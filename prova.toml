@@ -1,0 +1,20 @@
+# One manifest, two hats. In Prova a package is one prova.toml-rooted unit; this one both exports a
+# namespace (a plugin — `[plugin]`) and runs its own proofs (a suite). Author the plugin in
+# init.lua; prove it in proofs/; ship both together.
+[plugin]
+name = "operator-standards"
+description = "P6M Operator Standards"
+
+# The range of prova versions this plugin is built against; a consumer is checked against it.
+#
+# 0.14 is the floor because `ops.sut` passes `secrets` to `docker.build`, and BuildKit secrets landed
+# in 0.14. Every operator's production image mounts a private cargo registry token that way, so an
+# earlier prova cannot build the SUT at all.
+[requires]
+prova = ">=0.14"
+
+# Resolve THIS plugin from its own directory, so the self-tests can `require("operator-standards")` exactly as
+# a consumer would. A CONSUMER instead pins it by source — a released tag:
+#   operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", tag = "v1" }
+[plugins]
+operator-standards = { path = "." }

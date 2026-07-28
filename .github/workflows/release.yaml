@@ -1,0 +1,32 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Type of release to create"
+        required: true
+        default: "minor_release"
+        type: choice
+        options:
+          - "minor_release"
+          - "major_branch"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Tags the next version (per .version-line) and creates the GitHub release, so consumers can pin
+      # `prova-rs/prova-<name>@vX.Y.Z`. Same reusable action archetypes release with.
+      - name: Create Release
+        uses: archetect-actions/repository-release@v1
+        with:
+          release_type: ${{ github.event.inputs.release_type }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+

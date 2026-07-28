@@ -1,0 +1,9 @@
+.DS_Store
+# The LuaLS editor pointer, written when you run the self-test (or `prova init`). It holds
+# machine-local absolute paths, so it is per-machine rather than shared. The stub consumers' editors
+# read lives in library/operator-standards.lua and IS committed — that is source, not output.
+/.luarc.json
+# Nothing here for prova's generated state, deliberately. The --last-failed record and held-topology
+# run-state live in .prova/var/, which ships its own `.gitignore` of `*`. That self-ignore composes
+# recursively — every package ignores its own state, at any depth — so this file never needs an entry
+# for it, and adding one is redundant.
