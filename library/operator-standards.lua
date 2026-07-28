@@ -48,6 +48,19 @@ ops.contract = {}
 ---@return ops.Identity
 function ops.identity(spec) end
 
+--- Whether an Artifactory credential is available — the predicate behind the `artifactory`
+--- capability, so a suite skips with a named reason instead of failing on a 401 inside docker.
+--- Satisfied by `ARTIFACTORY_IDENTITY_TOKEN`, or a `~/.cargo/credentials.toml` from `cargo login`.
+---@return boolean
+function ops.has_artifactory() end
+
+--- Build the `secrets` table for `ops.sut` from the registry ids an operator's production Dockerfile
+--- mounts. Each gets the identity token as a Bearer credential; `ACTIONS_RUNTIME_TOKEN` is passed
+--- through. Host-side `cargo login` is not required — the build is containerized.
+---@param ids string[]
+---@return table
+function ops.artifactory_secrets(ids) end
+
 --- Build the operator's production image, load it into the cluster, run it, and return a handle
 --- whose `url` is its management port.
 ---@param spec { ctx: any, id: ops.Identity, cluster: prova.KindCluster, dir: string?, env: table?, format: string?, secrets: table?, buildargs: table?, dockerfile: string?, timeout: string?, tag_suffix: string? }

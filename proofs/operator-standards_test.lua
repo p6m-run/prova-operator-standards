@@ -215,3 +215,32 @@ prova.test_each("sut requires ${missing}", {
   t:expect(ok):is_falsy()
   t:expect(tostring(err)):contains(case.missing)
 end)
+
+--------------------------------------------------------------------------------------------------
+-- Artifactory credential plumbing — the gate, not the credential
+--------------------------------------------------------------------------------------------------
+
+prova.test("artifactory_secrets presents the identity token as a Bearer credential", function(t)
+  local secrets = ops.artifactory_secrets{ "p6m-run", "p6m-dev" }
+  for _, id in ipairs{ "p6m-run", "p6m-dev" } do
+    t:expect(secrets[id], id .. " gets a secret"):never():is_nil()
+    -- Artifactory rejects a bare identity token on these endpoints; the Bearer prefix is the contract.
+    t:expect(secrets[id].value, id .. " is a Bearer credential"):matches("^Bearer ")
+    -- It must be a literal value, not an env reference: the var a developer maintains is
+    -- ARTIFACTORY_IDENTITY_TOKEN, not a per-registry CARGO_REGISTRIES_<NAME>_TOKEN.
+    t:expect(secrets[id].env, id .. " is not an env passthrough"):is_nil()
+  end
+end)
+
+prova.test("ACTIONS_RUNTIME_TOKEN is satisfied by any value, since sccache's GHA cache is off", function(t)
+  local secrets = ops.artifactory_secrets{ "ACTIONS_RUNTIME_TOKEN" }
+  t:expect(secrets.ACTIONS_RUNTIME_TOKEN.value):never():is_nil()
+  -- Not a Bearer credential — it is not an Artifactory token at all.
+  t:expect(secrets.ACTIONS_RUNTIME_TOKEN.value):never():matches("^Bearer ")
+end)
+
+prova.test("has_artifactory answers the capability predicate as a boolean", function(t)
+  -- Deliberately does NOT assert which way: this machine's state is not the contract. What matters is
+  -- that the gate returns a usable boolean, so `requires = { "artifactory" }` skips rather than errors.
+  t:expect(type(ops.has_artifactory())):equals("boolean")
+end)

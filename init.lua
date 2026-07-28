@@ -120,6 +120,69 @@ function ops.identity(spec)
 end
 
 ------------------------------------------------------------------------------------------
+-- Artifactory credentials for the image build
+------------------------------------------------------------------------------------------
+
+-- The private cargo registry token, as Artifactory wants it presented.
+--
+-- Sourced from ARTIFACTORY_IDENTITY_TOKEN — the single variable the p6m workstation docs already
+-- have developers set — rather than a per-registry CARGO_REGISTRIES_<NAME>_TOKEN, so adding a
+-- registry costs nothing and a developer maintains one secret instead of three.
+--
+-- Falls back to ~/.cargo/credentials.toml so a machine set up with `cargo login` also works. Note
+-- that host-side `cargo login` is NOT a requirement here: the build happens in a container and the
+-- token is handed to it as a BuildKit secret, so the host needs no cargo registry configuration at
+-- all. (Which matters, because these operators define their registries per-repo in `.cargo/config*`
+-- — so `cargo login --registry p6m-run` only resolves from inside one of them.)
+local function identity_token()
+  local tok = os.getenv("ARTIFACTORY_IDENTITY_TOKEN")
+  if tok and tok ~= "" then
+    return tok
+  end
+
+  local home = os.getenv("HOME")
+  local path = home and (home .. "/.cargo/credentials.toml")
+  if path and fs.exists(path) then
+    -- Only the token line is needed; a full TOML parse would be more machinery than this warrants.
+    local found = fs.read(path):match('token%s*=%s*"([^"]+)"')
+    if found then
+      return (found:gsub("^Bearer%s+", ""))
+    end
+  end
+  return nil
+end
+
+--- Whether an Artifactory credential is available at all — the predicate behind the `artifactory`
+--- capability, so a suite SKIPS with a named reason instead of failing deep inside a docker build
+--- with a 401.
+--- @return boolean
+function ops.has_artifactory()
+  return identity_token() ~= nil
+end
+
+--- Build the `secrets` table for `ops.sut` from the registry ids an operator's production Dockerfile
+--- mounts. Every id gets the same identity token, presented as a Bearer credential.
+---
+---   secrets = ops.artifactory_secrets{ "p6m-run", "p6m-dev" }
+---
+--- `ACTIONS_RUNTIME_TOKEN` is handled too: 7 of the 8 prd Dockerfiles mount it for sccache's GitHub
+--- cache backend, which is off outside CI, so any non-empty value satisfies the mount.
+--- @param ids string[]
+--- @return table
+function ops.artifactory_secrets(ids)
+  local token = identity_token()
+  local secrets = {}
+  for _, id in ipairs(ids) do
+    if id == "ACTIONS_RUNTIME_TOKEN" then
+      secrets[id] = { value = os.getenv("ACTIONS_RUNTIME_TOKEN") or "unused" }
+    else
+      secrets[id] = { value = "Bearer " .. (token or "") }
+    end
+  end
+  return secrets
+end
+
+------------------------------------------------------------------------------------------
 -- ops.sut — the operator under proof, running in a real cluster
 ------------------------------------------------------------------------------------------
 
@@ -477,7 +540,7 @@ function ops.standards.traces(t, sut, _id)
   t:expect(
     sut.env[c.traces.endpoint_env],
     "this SUT was booted with " .. c.traces.endpoint_env .. " set, else this proves nothing"
-  ):exists()
+  ):never():is_nil()
 
   t:expect(
     http.get(sut.url .. c.liveness.path).status,
@@ -555,8 +618,8 @@ function ops.standards.chart(t, id, sut, chart_dir)
   local c = ops.contract
 
   -- An unprobed liveness endpoint is indistinguishable from an absent one at 3am.
-  t:expect(facts.livenessProbe, "the chart declares a livenessProbe"):exists()
-  t:expect(facts.readinessProbe, "the chart declares a readinessProbe"):exists()
+  t:expect(facts.livenessProbe, "the chart declares a livenessProbe"):never():is_nil()
+  t:expect(facts.readinessProbe, "the chart declares a readinessProbe"):never():is_nil()
   if not (facts.livenessProbe and facts.readinessProbe) then
     return
   end
@@ -578,7 +641,7 @@ function ops.standards.chart(t, id, sut, chart_dir)
     t:expect(
       resolved,
       kind .. " port `" .. tostring(ref) .. "` resolves to a declared containerPort"
-    ):exists()
+    ):never():is_nil()
     if resolved then
       t:expect(resolved, kind .. " targets the management port"):equals(c.management.default_port)
     end
