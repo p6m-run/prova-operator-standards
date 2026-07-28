@@ -66,6 +66,12 @@ ops.contract = {
   traces = { endpoint_env = "OTEL_EXPORTER_OTLP_ENDPOINT" },
   -- O6 — the chart.
   chart = { dir = "helm", probe_scheme = "HTTP" },
+  -- The private cargo registry the production image build must reach. Used only to VALIDATE the
+  -- credential before a build starts; the build itself resolves registries from each repo's
+  -- `.cargo/config*`.
+  registry = {
+    probe_url = "https://p6m.jfrog.io/artifactory/api/cargo/p6m-run-cargo-local/index/config.json",
+  },
 }
 
 ------------------------------------------------------------------------------------------
@@ -152,12 +158,88 @@ local function identity_token()
   return nil
 end
 
---- Whether an Artifactory credential is available at all — the predicate behind the `artifactory`
---- capability, so a suite SKIPS with a named reason instead of failing deep inside a docker build
---- with a 401.
+--- Classify the Artifactory credential: "ok" | "missing" | "rejected" | "unreachable", plus a
+--- human reason.
+---
+--- VALIDATES, rather than merely detecting. A presence-only check is what let this go unnoticed for
+--- weeks: `p6m workstation check core` reports "🟢 Artifactory Tokens Found" for a token Artifactory
+--- rejects, and the first version of this gate had the identical flaw — the live suite ran, spent 30s
+--- creating a cluster, and died on an opaque 401 deep inside a cargo fetch. A token that exists and a
+--- token that works are different facts, and only the second one gates anything usefully.
+---
+--- `probe` and `resolve` are injectable so every branch is provable without a network (the plugin's
+--- own suite is hermetic); production calls pass neither.
+---
+--- `resolve` is a token *resolver*, not a token: a bare `token` parameter cannot express "there is no
+--- credential", because nil is exactly what means "fall back to the real environment" — so the
+--- missing-credential branch would be untestable on any machine that has one. A resolver returning
+--- nil says it unambiguously.
+--- @param probe fun(url: string, opts: table): table|nil
+--- @param resolve fun(): string|nil
+--- @return string status, string reason
+function ops.artifactory_status(probe, resolve)
+  local token = (resolve or identity_token)()
+  if not token or token == "" then
+    return "missing",
+      "no ARTIFACTORY_IDENTITY_TOKEN, and no token in ~/.cargo/credentials.toml"
+  end
+
+  local url = ops.contract.registry.probe_url
+  probe = probe or function(u, opts)
+    return http.get(u, opts)
+  end
+
+  local ok, res = pcall(probe, url, {
+    headers = { Authorization = "Bearer " .. token },
+    timeout = "10s",
+  })
+  if not ok or not res then
+    return "unreachable", "could not reach " .. url .. " (offline?)"
+  end
+  if res.status == 200 then
+    return "ok", "credential accepted by " .. url
+  end
+  return "rejected",
+    string.format(
+      "%s rejected the credential (HTTP %d) — regenerate at https://p6m.jfrog.io "
+        .. "(Edit Profile → Generate an Identity Token)",
+      url,
+      res.status
+    )
+end
+
+--- The predicate behind the `artifactory` capability, so a suite SKIPS instead of failing deep inside
+--- a docker build with a 401.
+---
+--- Only "missing" and "rejected" gate. "unreachable" deliberately does NOT, for two reasons:
+---
+---   * The probe runs in the prova process; the build runs in the Docker daemon. Those have different
+---     network paths, so prova failing to reach the registry is not evidence the build will. (Observed
+---     directly: `docker pull` and `kind` image pulls succeed on a machine where prova's own
+---     `http.get` to an external host fails intermittently — measured 2 of 5 attempts.)
+---   * Blocking on a flaky probe converts a working environment into random skips, and a skipped
+---     suite reads as a green one. Better to proceed and let the build state the real answer than to
+---     silently claim coverage we did not run.
+---
+--- Must return a BOOLEAN: prova parses a returned string as a *version*, not a reason, so the reason
+--- is printed. The skip line itself only names the capability.
 --- @return boolean
 function ops.has_artifactory()
-  return identity_token() ~= nil
+  local status, reason = ops.artifactory_status()
+  if status == "ok" then
+    return true
+  end
+  if status == "unreachable" then
+    print(
+      "prova: capability `artifactory` could not be validated — "
+        .. reason
+        .. "; proceeding, since the image build resolves the registry through the Docker daemon, "
+        .. "not this process"
+    )
+    return true
+  end
+  print("prova: capability `artifactory` unmet (" .. status .. ") — " .. reason)
+  return false
 end
 
 --- Build the `secrets` table for `ops.sut` from the registry ids an operator's production Dockerfile

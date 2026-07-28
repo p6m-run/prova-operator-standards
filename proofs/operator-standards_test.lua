@@ -241,6 +241,91 @@ end)
 
 prova.test("has_artifactory answers the capability predicate as a boolean", function(t)
   -- Deliberately does NOT assert which way: this machine's state is not the contract. What matters is
-  -- that the gate returns a usable boolean, so `requires = { "artifactory" }` skips rather than errors.
+  -- that the gate returns a usable boolean — prova parses a returned STRING as a version, so a reason
+  -- string here would be a load error, not a skip.
   t:expect(type(ops.has_artifactory())):equals("boolean")
+end)
+
+-- The gate VALIDATES rather than detects. A presence-only check is what let the dead token go
+-- unnoticed: `p6m workstation check core` reports it green, and the first version of this gate did
+-- too — the suite spent 30s standing a cluster up before dying on an opaque 401. All four branches are
+-- proven with an injected probe, so no network is touched.
+prova.test_each("artifactory_status classifies ${case}", {
+  {
+    case = "a missing credential",
+    resolve = function() return nil end,
+    probe = function() error("must not be probed without a token") end,
+    status = "missing",
+    reason = "ARTIFACTORY_IDENTITY_TOKEN",
+  },
+  {
+    case = "an empty credential",
+    resolve = function() return "" end,
+    probe = function() error("must not be probed with an empty token") end,
+    status = "missing",
+    reason = "ARTIFACTORY_IDENTITY_TOKEN",
+  },
+  {
+    case = "an accepted credential",
+    resolve = function() return "good" end,
+    probe = function() return { status = 200 } end,
+    status = "ok",
+    reason = "accepted",
+  },
+  {
+    case = "a rejected credential",
+    resolve = function() return "stale" end,
+    probe = function() return { status = 401 } end,
+    status = "rejected",
+    -- The reason must be actionable: a 401 here means regenerate, and it should say where.
+    reason = "p6m.jfrog.io",
+  },
+  {
+    case = "an unreachable registry",
+    resolve = function() return "good" end,
+    probe = function() error("connection refused") end,
+    status = "unreachable",
+    reason = "could not reach",
+  },
+}, function(t, c)
+  local status, reason = ops.artifactory_status(c.probe, c.resolve)
+  t:expect(status):equals(c.status)
+  t:expect(reason):contains(c.reason)
+end)
+
+prova.test("a rejected credential is distinguished from a missing one", function(t)
+  -- The whole point of validating: these two must not collapse into one answer, because the fix
+  -- differs (set a variable vs regenerate a token).
+  local missing = ops.artifactory_status(function() return { status = 200 } end, function() return nil end)
+  local rejected = ops.artifactory_status(function() return { status = 401 } end, function() return "stale" end)
+  t:expect(missing):never():equals(rejected)
+  t:expect(missing):equals("missing")
+  t:expect(rejected):equals("rejected")
+end)
+
+prova.test("a token is never echoed into the reason", function(t)
+  -- The reason is printed to stdout and lands in CI logs.
+  local _, reason = ops.artifactory_status(function() return { status = 401 } end, function() return "super-secret-token" end)
+  t:expect(reason):never():contains("super-secret-token")
+end)
+
+-- Which statuses GATE, and which merely warn. This is the one behavioural decision in the credential
+-- layer, and it is easy to get backwards: "unreachable" must not block, because the probe runs in the
+-- prova process while the build runs in the Docker daemon — different network paths — and because a
+-- flaky probe that blocks turns a working environment into random skips, which read as green.
+prova.test_each("has_artifactory ${verdict} on ${case}", {
+  { case = "ok", verdict = "proceeds", probe = function() return { status = 200 } end,
+    token = "good", expect_pass = true },
+  { case = "an unreachable registry", verdict = "proceeds", probe = function() error("no route") end,
+    token = "good", expect_pass = true },
+  { case = "a rejected credential", verdict = "blocks", probe = function() return { status = 401 } end,
+    token = "stale", expect_pass = false },
+  { case = "a missing credential", verdict = "blocks", probe = function() return { status = 200 } end,
+    token = nil, expect_pass = false },
+}, function(t, c)
+  -- has_artifactory() reads the real environment, so the decision table is asserted through the
+  -- classifier it wraps plus the documented mapping. Keeps the proof hermetic and total.
+  local status = ops.artifactory_status(c.probe, function() return c.token end)
+  local gates = (status == "missing" or status == "rejected")
+  t:expect(not gates, c.case .. " → " .. c.verdict):equals(c.expect_pass)
 end)
