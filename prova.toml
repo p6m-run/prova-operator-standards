@@ -7,11 +7,11 @@ description = "P6M Operator Standards"
 
 # The range of prova versions this plugin is built against; a consumer is checked against it.
 #
-# 0.14 is the floor because `ops.sut` passes `secrets` to `docker.build`, and BuildKit secrets landed
-# in 0.14. Every operator's production image mounts a private cargo registry token that way, so an
+# 0.15 is the floor because `ops.sut` passes `secrets` to `docker.build`, and BuildKit secrets landed
+# in 0.15 (v0.14.0 predates them — it was already released when this work started). Every operator's production image mounts a private cargo registry token that way, so an
 # earlier prova cannot build the SUT at all.
 [requires]
-prova = ">=0.14"
+prova = ">=0.15"
 
 # Resolve THIS plugin from its own directory, so the self-tests can `require("operator-standards")` exactly as
 # a consumer would. A CONSUMER instead pins it by source — a released tag:
