@@ -419,3 +419,52 @@ operator-standards = { git = "https://github.com/p6m-run/prova-operator-standard
   end
   t:expect(pins_moving(table.concat(stripped, "\n"))):is_empty()
 end)
+
+prova.test("a CRD schema describing probe fields does not hijack the parse", function(t)
+  -- The real shape that failed four operators: these charts ship CRDs whose OpenAPI schemas describe
+  -- the probes of the workloads the operator MANAGES. Those properties are literally named
+  -- readinessProbe and carry a `description:`, so scanning the whole render read the CRD and reported
+  -- path "description:" for charts that were entirely correct.
+  local rendered = [[
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: platformapplications.p6m.dev
+spec:
+  versions:
+    - schema:
+        openAPIV3Schema:
+          properties:
+            readinessProbe:
+              description: HTTP path for the readiness check
+              properties:
+                path:
+                  description: the path
+                  type: string
+---
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: operator
+          ports:
+            - name: metrics
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+          resources: {}
+]]
+  local facts = ops.chart_probe_facts(rendered)
+  t:expect(facts.readinessProbe.path, "reads the Deployment's probe, not the CRD's schema")
+    :equals("/readyz")
+  t:expect(facts.livenessProbe.path):equals("/healthz")
+  t:expect(facts.ports.metrics):equals(9090)
+end)

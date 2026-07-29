@@ -674,6 +674,24 @@ end
 function ops.chart_probe_facts(yaml_text)
   local facts = { ports = {} }
 
+  -- Narrow to the DEPLOYMENT documents first.
+  --
+  -- `helm template` renders every template, and these charts ship their CRDs — whose OpenAPI schemas
+  -- describe the probe fields of the workloads the operator manages. Those schemas contain properties
+  -- literally named `readinessProbe`, each with a `description:`. Scanning the whole multi-document
+  -- render therefore read a CRD's schema and reported `path: "description:"`, failing four operators
+  -- whose charts were correct. The probes under proof are the OPERATOR's own, and those live only in
+  -- its Deployment.
+  local deployments = {}
+  for doc in (yaml_text .. "\n---\n"):gmatch("(.-)\n%-%-%-") do
+    if doc:match("\nkind:%s*Deployment") or doc:match("^kind:%s*Deployment") then
+      deployments[#deployments + 1] = doc
+    end
+  end
+  if #deployments > 0 then
+    yaml_text = table.concat(deployments, "\n")
+  end
+
   -- Named container ports, so a probe's `port: metrics` resolves to a number. Both key orders.
   for name, num in yaml_text:gmatch("name:%s*([%w-]+)%s*\n%s*containerPort:%s*(%d+)") do
     facts.ports[name] = tonumber(num)
