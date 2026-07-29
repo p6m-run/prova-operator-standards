@@ -27,25 +27,41 @@ compliant. (DECIDED 2026-07-28.)
 > observability at all" — read off a `platform-kubernetes-libraries` working copy sitting on an old
 > commit, where `p6m-kube-metrics` did not yet exist. On origin's `main` it did, and had for
 > versions. **Verify against the org's `main`, or against a suite run — never a working copy.**
+>
+> **And it demonstrated it twice (corrected 2026-07-29).** Three more rows below were wrong the same
+> way. `github-operator`, `installation-operator`, and `platform-organization-operator` all already
+> depended on `p6m-kube-metrics` on origin/`main` — so the headline claim that *five of eight* expose
+> no management surface was itself a stale-checkout artifact. **The real number is two:**
+> `platform-agent-operator` and `platform-edge-operator`. Of the other six, three needed nothing
+> beyond the harness to pass, and three needed a patch of 18–55 lines. Rows since verified against
+> `main@origin` are marked ✅ below. The lesson survived contact with itself: this table is history,
+> and **the suite is the status board.**
 
 Surveyed across the eight operators, each at origin/`main`:
 
 | Operator | health/metrics surface | probes wired in chart | log format honored | OTel export |
 |---|---|---|---|---|
-| `github-operator` | ✗ none | ✗ | ✓ | ✗ |
-| `installation-operator` | ⚠️ own `/health` on the webhook port | ✗ | ✗ — `_settings` ignored | ✗ — commented out |
-| `platform-agent-operator` | ✗ none | ✗ | ✓ | ✗ |
+| `github-operator` | ✅ `p6m-kube-metrics` (`kube,clap`) — survey said none | ✗ | ✓ | ✗ |
+| `installation-operator` | ✅ `p6m-kube-metrics` (`clap`) — survey said none | ✗ | ✗ — `_settings` ignored | ✗ — commented out |
+| `platform-agent-operator` | ✅ ✗ none — confirmed, `kube 0.99`/`k8s-openapi 0.24` | ✗ | ✓ | ✗ |
 | `platform-application-operator` | ✓ `p6m-kube-metrics` | ✓ | ✓ | ✗ — no `otel` feature |
 | `platform-cluster-operator` | ✓ `p6m-kube-metrics` | ✓ | ✗ — `_settings` ignored | ✓ |
-| `platform-edge-operator` | ✗ none | ✗ | ✓ | ✗ |
-| `platform-organization-operator` | ✗ none (TLS-only webhook server) | ✗ | ✓ | ✗ |
+| `platform-edge-operator` | ✅ ✗ none — confirmed, `kube 0.87`/`k8s-openapi 0.20` | ✗ — and no chart at all | ✓ | ✗ |
+| `platform-organization-operator` | ✅ `p6m-kube-metrics` (`clap,kube`) — survey said none | ✓ — survey said ✗ | ✓ | ✗ |
 | `platform-resource-operator` | ✓ `p6m-kube-metrics` | ✓ | ✓ | ✗ |
 
 What the survey found, stated as the failure modes these standards exist to catch:
 
-- **Five of eight expose no health, readiness, or metrics endpoint at all.** Their `routes.rs` is a
-  copy-pasted axum `Router` with a single `/` handler returning the operator's display name as a
-  string literal. Nothing probes them; nothing scrapes them.
+- **Two of eight expose no health, readiness, or metrics endpoint at all** (the survey said five; see
+  the correction above). Their `routes.rs` is a copy-pasted axum `Router` with a single `/` handler
+  returning the operator's display name as a string literal. Nothing probes them; nothing scrapes
+  them. Those two — `platform-agent-operator` and `platform-edge-operator` — are also the two most
+  dependency-stale in the fleet, on `kube 0.99`/`k8s-openapi 0.24` and `kube 0.87`/`k8s-openapi 0.20`
+  respectively while every compliant operator sits on `kube 2.0.1`/`k8s-openapi 0.26.1`. That
+  correlation is not a coincidence and it shapes the retrofit: `p6m-kube-metrics` is adopted there
+  with the **`clap` feature only**, because the `kube` feature would drag a second, semver-incompatible
+  `k8s-openapi` into the graph. Nothing in the O1–O4 surface needs kube types, so this costs nothing —
+  `installation-operator` had already been running that way.
 - **A chart can probe a path the binary does not serve.** This is the defect class O6 exists for,
   and it is the reason the bar does not stop at the container.
 - **Dead config reads as configured.** `installation-operator` and `platform-cluster-operator` both
@@ -56,9 +72,12 @@ What the survey found, stated as the failure modes these standards exist to catc
   registration is commented out, leaving `create_otlp_tracer_provider()` as unreachable code. Its
   tracer name is also hardcoded to `"platform-cluster-operator"` — a copy-paste that would have
   mislabeled every span had the layer ever been enabled.
-- **`platform-organization-operator` has no plaintext port at all.** Its only HTTP server is
-  TLS-only (OpenSSL) on the webhook port, so there is nowhere for a kubelet HTTP probe or a
-  Prometheus scrape to land.
+- **A TLS-only webhook server leaves nowhere for a kubelet HTTP probe or a Prometheus scrape to
+  land.** The survey named `platform-organization-operator` here; that was the third stale row — it
+  runs `run_metrics_server` on plaintext 9090 alongside its OpenSSL webhook server, and its chart
+  probes it. `platform-agent-operator` is the operator this actually describes, and
+  `platform-organization-operator` is the reference for fixing it: same TLS-webhook shape, management
+  surface added beside it rather than on it.
 
 ## 2. The standard
 
@@ -144,6 +163,19 @@ neither. Every probe a chart declares must name a path and port the SUT actually
 An operator whose chart declares no probes fails this: an unprobed liveness endpoint is
 indistinguishable from an absent one at 3am. (This is the gap `prova-p6m-standards` S5 notes for
 services — "liveness is implemented and never probed" — closed here rather than inherited.)
+
+**Shipping a chart is itself part of the bar** (DECIDED 2026-07-29). The first assertion in this axis
+is that `helm/` exists, so a Kustomize-only operator is a caught defect rather than a special case.
+`platform-edge-operator` was the live instance — the lone operator of the eight with no chart at all —
+and the decision was to give it one matching its siblings rather than teach the plugin a second
+packaging shape. A bar that renders two shapes is a bar that permits two shapes, which is the
+opposite of *identical at the boundary*, and the second shape would have existed for exactly one repo.
+
+**Known limit: O6 proves the chart, not the deployment.** Four operators — `github-operator`,
+`platform-cluster-operator`, `platform-organization-operator`, `platform-edge-operator` — are deployed
+from Kustomize overlays in `p6m-run/.platform`, not from the chart this axis renders. So O6 can be
+green while the running pod is unprobed, which is this same defect class one level up. Tracked as
+**YP6M-3225**, deliberately out of scope here: the fix is a deployment-path decision, not a proof.
 
 ### O7 — Traces, fail-open
 OTel wired **fail-open**: exporting iff `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and booting normally
