@@ -48,10 +48,21 @@ ops.contract = {
     -- Either is acceptable: OpenMetrics is what prometheus-client emits, text/plain is what most
     -- other exporters emit. Both are scrapeable.
     content_types = { "application/openmetrics-text", "text/plain" },
+    -- Asserted via each family's `# TYPE` DECLARATION, not by looking for a sample line.
+    --
+    -- A labelled family legitimately has no series until it has a child: `reconcile_failures` is a
+    -- Family<ErrorLabels, Counter>, so `{prefix}_reconcile_failures_total` does not appear until the
+    -- first failure is recorded. Asserting the sample would demand a fake `instance`/`error` pair be
+    -- pre-registered just to satisfy the proof — a bogus series in every production dashboard, which
+    -- is a worse outcome than the gap it papers over.
+    --
+    -- The declaration is the property that actually matters: it is what makes the family discoverable
+    -- and what an alert rule binds to.
     families = {
-      "{prefix}_reconcile_runs_total",
-      "{prefix}_reconcile_failures_total",
-      "{prefix}_reconcile_duration_seconds",
+      { suffix = "_reconcile_runs", kind = "counter" },
+      { suffix = "_reconcile_failures", kind = "counter" },
+      -- Registered with an explicit Seconds unit, so the exposed name carries the suffix.
+      { suffix = "_reconcile_duration_seconds", kind = "histogram" },
     },
     failure_labels = { "instance", "error" },
   },
@@ -117,7 +128,17 @@ function ops.identity(spec)
   function id:metric_families()
     local out = {}
     for _, f in ipairs(ops.contract.metrics.families) do
-      out[#out + 1] = (f:gsub("{prefix}", self.metric_prefix))
+      out[#out + 1] = self.metric_prefix .. f.suffix
+    end
+    return out
+  end
+
+  --- The same families as `{ name, kind }`, for asserting the `# TYPE` declarations.
+  --- @return table[]
+  function id:metric_family_specs()
+    local out = {}
+    for _, f in ipairs(ops.contract.metrics.families) do
+      out[#out + 1] = { name = self.metric_prefix .. f.suffix, kind = f.kind }
     end
     return out
   end
@@ -536,8 +557,10 @@ function ops.standards.metrics(t, sut, id)
   -- A stub string is the failure this catches: real exposition carries TYPE metadata.
   t:expect(body, "body is Prometheus exposition, not a stub"):contains("# TYPE")
 
-  for _, family in ipairs(id:metric_families()) do
-    t:expect(body, "exposes " .. family):contains(family)
+  for _, fam in ipairs(id:metric_family_specs()) do
+    -- The declaration, not a sample: see `contract.metrics.families` for why.
+    t:expect(body, "declares " .. fam.name .. " (" .. fam.kind .. ")")
+      :contains("# TYPE " .. fam.name .. " " .. fam.kind)
   end
 
   -- The one metrics property whose violation degrades the monitoring system rather than the signal:

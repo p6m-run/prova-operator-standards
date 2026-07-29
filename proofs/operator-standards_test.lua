@@ -62,20 +62,47 @@ end)
 prova.test("metric_prefix is overridable, because a registered prefix may differ", function(t)
   local id = ops.identity{ name = "installation-operator", metric_prefix = "installation" }
   t:expect(id.metric_prefix):equals("installation")
-  t:expect(id:metric_families()):contains("installation_reconcile_runs_total")
+  t:expect(id:metric_families()):contains("installation_reconcile_runs")
 end)
 
-prova.test("metric_families substitutes the prefix into every contract family", function(t)
+prova.test("metric_families prefixes every contract family", function(t)
   local id = ops.identity{ name = "platform-edge-operator" }
   local fams = id:metric_families()
   t:expect(fams):has_length(#ops.contract.metrics.families)
-  t:expect(fams):contains("platform_edge_operator_reconcile_runs_total")
-  t:expect(fams):contains("platform_edge_operator_reconcile_failures_total")
+  t:expect(fams):contains("platform_edge_operator_reconcile_runs")
+  t:expect(fams):contains("platform_edge_operator_reconcile_failures")
   t:expect(fams):contains("platform_edge_operator_reconcile_duration_seconds")
-  -- A missed substitution would make O4 assert on the literal "{prefix}_..." and fail confusingly
-  -- rather than clearly.
-  for _, f in ipairs(fams) do
-    t:expect(f):never():contains("{prefix}")
+end)
+
+prova.test("metric_family_specs carries the TYPE kind O4 asserts on", function(t)
+  -- O4 asserts each family's `# TYPE` DECLARATION rather than a sample line, because a labelled
+  -- family (reconcile_failures) has no series until its first child. Getting that wrong is what made
+  -- the first live run report drift that was not there.
+  local specs = ops.identity{ name = "platform-edge-operator" }:metric_family_specs()
+  t:expect(specs):has_length(3)
+  local by_name = {}
+  for _, sp in ipairs(specs) do
+    by_name[sp.name] = sp.kind
+  end
+  t:expect(by_name["platform_edge_operator_reconcile_runs"]):equals("counter")
+  t:expect(by_name["platform_edge_operator_reconcile_failures"]):equals("counter")
+  t:expect(by_name["platform_edge_operator_reconcile_duration_seconds"]):equals("histogram")
+end)
+
+prova.test("the exposition p6m-kube-metrics actually emits satisfies O4", function(t)
+  -- Verbatim shape from the live run on 2026-07-28, trimmed. The failures family declares its TYPE
+  -- and has NO sample — exactly the case the first cut of O4 misread as a missing metric.
+  local body = [==[
+# HELP platform_cluster_operator_reconcile_runs Total number of reconciliations.
+# TYPE platform_cluster_operator_reconcile_runs counter
+platform_cluster_operator_reconcile_runs_total 0
+# HELP platform_cluster_operator_reconcile_failures Total number of reconciliation failures.
+# TYPE platform_cluster_operator_reconcile_failures counter
+# HELP platform_cluster_operator_reconcile_duration_seconds Duration of reconciliations.
+# TYPE platform_cluster_operator_reconcile_duration_seconds histogram
+]==]
+  for _, sp in ipairs(ops.identity{ name = "platform-cluster-operator" }:metric_family_specs()) do
+    t:expect(body, "declares " .. sp.name):contains("# TYPE " .. sp.name .. " " .. sp.kind)
   end
 end)
 
