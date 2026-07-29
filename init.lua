@@ -795,9 +795,27 @@ function ops.standards.hygiene(t, _id)
     :never()
     :matches("\n%s*paths%s*=")
 
-  -- A plugin pinned to a moving ref makes the suite non-reproducible.
+  -- A plugin pinned to a moving ref makes the suite non-reproducible — with ONE sanctioned
+  -- exception, `dev`.
+  --
+  -- `dev` is the org's integration branch (prova-p6m-standards and every archetype repo carry
+  -- `dev` alongside `main`), and pinning it is how a standards plugin is iterated on before it has
+  -- earned a release. Allowing it by silence would be an accident; allowing it by name is a
+  -- decision, and it comes with the obligation below.
+  --
+  -- `main` is never acceptable: it is the release branch, so pinning it gets you whatever shipped
+  -- last with none of a tag's reproducibility.
   t:expect(text, "no plugin is pinned to @main"):never():contains("@main")
   t:expect(text, 'no plugin is pinned to branch = "main"'):never():matches('branch%s*=%s*"main"')
+
+  -- A `dev` pin is allowed but must not be silent: say so, so it cannot quietly outlive the
+  -- incubation that justified it. This is the reminder that O8 is not yet fully satisfied.
+  if text:match('branch%s*=%s*"dev"') then
+    print(
+      "prova: O8 — a plugin is pinned to `dev` (incubation). Graduate it to a released tag "
+        .. "before this suite is treated as reproducible."
+    )
+  end
 
   -- A local path plugin is fine while incubating but must never be committed: it resolves only on the
   -- machine that wrote it.

@@ -169,6 +169,16 @@ explicit `version:` (its default release goes stale as prova moves). The suite r
 kind, and kubectl** and no Rust toolchain on the host: what is proven is the image CI publishes,
 under the env contract the chart injects.
 
+**The `dev` exception (DECIDED 2026-07-29).** One moving ref is sanctioned: `branch = "dev"`, the
+org's integration branch — `prova-p6m-standards` and every archetype repo carry `dev` alongside
+`main`. Pinning it is how a standards plugin is iterated on before it has earned a release, and
+holding the consumers to a tag that does not exist yet would just block the work the bar exists to
+enable.
+
+It is allowed **by name, not by silence**: the proof matches `dev` explicitly and prints a reminder
+that the pin must graduate to a released tag. `main` stays forbidden — it is the release branch, so
+pinning it buys whatever shipped last with none of a tag's reproducibility.
+
 ## 3. The plugin: `prova-operator-standards` (require name `operator-standards`)
 
 Everything is parameterized by the operator's identity, so expectations are a pure function of one
