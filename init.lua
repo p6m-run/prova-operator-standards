@@ -732,8 +732,22 @@ function ops.standards.chart(t, id, sut, chart_dir)
   t:expect(dir, "the operator ships a Helm chart"):is_dir()
 
   local rendered = shell.run({ "helm", "template", id.name, dir }, { timeout = "120s" })
-  t:expect(rendered:ok(), "helm template renders the chart:\n" .. (rendered.stderr or "")):is_true()
   if not rendered:ok() then
+    -- Carry the exit code AND both streams. The first cut reported only stderr, and helm exited with
+    -- it empty — leaving "helm template renders the chart:" and nothing else, which is undiagnosable
+    -- without shelling out by hand. Same lesson as prova's own HTTP errors: a failure message that
+    -- drops the cause turns a one-run diagnosis into guesswork.
+    t:expect(
+      false,
+      string.format(
+        "helm template %s %s failed (exit %s)\n--- stderr:\n%s\n--- stdout:\n%s",
+        id.name,
+        dir,
+        tostring(rendered.code),
+        (rendered.stderr ~= nil and rendered.stderr ~= "") and rendered.stderr or "(empty)",
+        (rendered.stdout ~= nil and rendered.stdout ~= "") and rendered.stdout:sub(1, 2000) or "(empty)"
+      )
+    ):is_true()
     return
   end
 
