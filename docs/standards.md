@@ -179,6 +179,35 @@ It is allowed **by name, not by silence**: the proof matches `dev` explicitly an
 that the pin must graduate to a released tag. `main` stays forbidden — it is the release branch, so
 pinning it buys whatever shipped last with none of a tag's reproducibility.
 
+#### The reverse spec — a phase tracker that cannot rot
+
+The `dev` pin has an expiry, and the suite carries it as a **reverse spec**: a spec whose body
+asserts the **end state** rather than absent behavior.
+
+```lua
+prova.test("every plugin is pinned to a released tag",
+  { spec = "operator-standards incubates on `dev` until it cuts v1 — YP6M-3208" },
+  function(t) ops.standards.released_pins(t) end)
+```
+
+prova's spec semantics supply the whole mechanic, in both directions:
+
+| State | Body | prova reports | Effect |
+|---|---|---|---|
+| Pinned to `dev` | red | **open spec** — CI green, listed by `prova specs` | the reminder is executable |
+| Pinned to a tag | green | **FAILURE**: *"spec honored — convert the flag or remove it"* | migration + cleanup land in one commit |
+
+That inversion is what makes it durable. A TODO comment rots because nothing checks it; this
+reminder is checked on every run, stays out of the way while it is still true, and becomes loud the
+instant it stops being true. `git grep TODO` lies; `prova specs` cannot.
+
+Across a fleet it is a **phase tracker**: `prova specs` in each repo enumerates who is still on the
+incubation pin, and the surface empties itself as repos migrate. The last repo to graduate is the
+one still listing it.
+
+Generalizes past this ticket — any migration with a known end state can be tracked this way: a
+deprecated API still in use, a version floor not yet raised, a flag not yet flipped.
+
 ## 3. The plugin: `prova-operator-standards` (require name `operator-standards`)
 
 Everything is parameterized by the operator's identity, so expectations are a pure function of one
