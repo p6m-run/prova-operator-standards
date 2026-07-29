@@ -769,6 +769,59 @@ end
 -- O8 — suite hygiene
 ------------------------------------------------------------------------------------------
 
+--- O8's end state, authored as a REVERSE SPEC: every git-sourced plugin pinned to a released tag.
+---
+--- The inversion is the point. A normal spec asserts behavior that does not exist yet; this one
+--- asserts a state the repo has not reached yet — and prova's spec semantics do the rest:
+---
+---   * while a plugin is still pinned to `dev`, the body is RED, so it reports as an open spec, CI
+---     stays green, and `prova specs` lists it. The reminder lives in the suite, not in a TODO
+---     comment or someone's memory.
+---   * the moment the pin is moved to a released tag, the body turns GREEN — which prova reports as a
+---     FAILURE demanding the spec flag be dropped. Graduation lands in the same commit as the
+---     migration it describes.
+---
+--- Across a fleet this becomes a phase tracker: `prova specs` in each repo enumerates who is still on
+--- the incubation pin, and the surface empties itself as they migrate.
+---
+--- Call it wrapped in a spec while incubating:
+---
+---   prova.test("plugins are pinned to released tags",
+---     { spec = "operator-standards is on dev until it cuts v1 — YP6M-3208" },
+---     function(t) ops.standards.released_pins(t) end)
+---
+--- @param t any
+function ops.standards.released_pins(t)
+  local root = prova.root
+  local nook = root .. "/.prova/prova.toml"
+  local manifest_path = fs.exists(nook) and nook or root .. "/prova.toml"
+  local raw = fs.read(manifest_path)
+
+  -- Directives only: the manifest's own prose explains WHY a dev pin is there, and matching that
+  -- text would make the comment fail the check it documents.
+  local lines = {}
+  for line in raw:gmatch("[^\n]*") do
+    local code = line:gsub("#.*$", "")
+    if code:match("%S") then
+      lines[#lines + 1] = code
+    end
+  end
+  local text = table.concat(lines, "\n")
+
+  local moving = {}
+  for decl in text:gmatch("[%w_-]+%s*=%s*{[^}]*}") do
+    if decl:find("git%s*=") and not decl:find("tag%s*=") then
+      moving[#moving + 1] = (decl:match("^([%w_-]+)") or "?")
+    end
+  end
+
+  t:expect(
+    moving,
+    "every git-sourced plugin is pinned to a released tag; still moving: "
+      .. (#moving > 0 and table.concat(moving, ", ") or "none")
+  ):is_empty()
+end
+
 --- O8 — properties of the repo, not of a running operator, so this needs no cluster and no docker.
 function ops.standards.hygiene(t, _id)
   local root = prova.root

@@ -356,3 +356,66 @@ prova.test_each("has_artifactory ${verdict} on ${case}", {
   local gates = (status == "missing" or status == "rejected")
   t:expect(not gates, c.case .. " → " .. c.verdict):equals(c.expect_pass)
 end)
+
+--------------------------------------------------------------------------------------------------
+-- released_pins — the REVERSE SPEC, proven in both directions
+--------------------------------------------------------------------------------------------------
+
+-- The value of this helper is entirely in when it flips. Held against fixture manifests rather than
+-- this repo's own, so the proof does not change meaning the day we migrate.
+local function pins_moving(text)
+  local moving = {}
+  for decl in text:gmatch("[%w_-]+%s*=%s*{[^}]*}") do
+    if decl:find("git%s*=") and not decl:find("tag%s*=") then
+      moving[#moving + 1] = (decl:match("^([%w_-]+)") or "?")
+    end
+  end
+  return moving
+end
+
+prova.test("a dev pin is what keeps the spec OPEN (body red, CI green)", function(t)
+  local manifest = [[
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", branch = "dev" }
+kind = { git = "https://github.com/prova-rs/prova-kind", tag = "v1" }
+]]
+  local moving = pins_moving(manifest)
+  t:expect(moving):has_length(1)
+  t:expect(moving):contains("operator-standards")
+end)
+
+prova.test("moving the pin to a tag is what turns the spec GREEN — and so demands graduation", function(t)
+  -- prova reports a spec whose body passes as a FAILURE ("convert the flag or remove it"), so this
+  -- transition is the forcing function: the migration and the flag removal land in one commit.
+  local manifest = [[
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", tag = "v1" }
+kind = { git = "https://github.com/prova-rs/prova-kind", tag = "v1" }
+]]
+  t:expect(pins_moving(manifest)):is_empty()
+end)
+
+prova.test("a rev pin counts as moving too — only a tag graduates", function(t)
+  local manifest = [[
+[plugins]
+a = { git = "https://example.com/a", rev = "deadbeef" }
+b = { git = "https://example.com/b", branch = "main" }
+]]
+  t:expect(pins_moving(manifest)):has_length(2)
+end)
+
+prova.test("the manifest's own prose about dev does not trip the check", function(t)
+  -- The comment explaining WHY a dev pin exists mentions `branch = "dev"`. Matching raw text would
+  -- make the documentation fail the check it documents — the same false positive O8 already hit once.
+  local manifest = [[
+# Pinned to `dev` for now; see the note about branch = "dev" above.
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", tag = "v1" }
+]]
+  local stripped = {}
+  for line in manifest:gmatch("[^\n]*") do
+    local code = line:gsub("#.*$", "")
+    if code:match("%S") then stripped[#stripped + 1] = code end
+  end
+  t:expect(pins_moving(table.concat(stripped, "\n"))):is_empty()
+end)
