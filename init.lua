@@ -731,7 +731,23 @@ function ops.standards.chart(t, id, sut, chart_dir)
   local dir = chart_dir or (prova.root .. "/" .. ops.contract.chart.dir)
   t:expect(dir, "the operator ships a Helm chart"):is_dir()
 
-  local rendered = shell.run({ "helm", "template", id.name, dir }, { timeout = "120s" })
+  -- Render with the chart's own test values when it ships them.
+  --
+  -- A chart may legitimately `required` a deployment-time value with no sensible default —
+  -- platform-organization-operator's `aws.organizationManagement.roleArn` is one — so rendering with
+  -- defaults alone fails on a chart that is perfectly correct. `ci/test-values.yaml` (helm's own
+  -- convention for `helm test`) or `test-values.yaml` is where a chart states the minimum that makes
+  -- it render, so O6 uses it when present and plain defaults otherwise.
+  local args = { "helm", "template", id.name, dir }
+  for _, candidate in ipairs{ dir .. "/ci/test-values.yaml", dir .. "/test-values.yaml" } do
+    if fs.exists(candidate) then
+      args[#args + 1] = "-f"
+      args[#args + 1] = candidate
+      break
+    end
+  end
+
+  local rendered = shell.run(args, { timeout = "120s" })
   if not rendered:ok() then
     -- Carry the exit code AND both streams. The first cut reported only stderr, and helm exited with
     -- it empty — leaving "helm template renders the chart:" and nothing else, which is undiagnosable
