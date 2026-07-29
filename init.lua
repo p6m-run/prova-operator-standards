@@ -48,10 +48,21 @@ ops.contract = {
     -- Either is acceptable: OpenMetrics is what prometheus-client emits, text/plain is what most
     -- other exporters emit. Both are scrapeable.
     content_types = { "application/openmetrics-text", "text/plain" },
+    -- Asserted via each family's `# TYPE` DECLARATION, not by looking for a sample line.
+    --
+    -- A labelled family legitimately has no series until it has a child: `reconcile_failures` is a
+    -- Family<ErrorLabels, Counter>, so `{prefix}_reconcile_failures_total` does not appear until the
+    -- first failure is recorded. Asserting the sample would demand a fake `instance`/`error` pair be
+    -- pre-registered just to satisfy the proof — a bogus series in every production dashboard, which
+    -- is a worse outcome than the gap it papers over.
+    --
+    -- The declaration is the property that actually matters: it is what makes the family discoverable
+    -- and what an alert rule binds to.
     families = {
-      "{prefix}_reconcile_runs_total",
-      "{prefix}_reconcile_failures_total",
-      "{prefix}_reconcile_duration_seconds",
+      { suffix = "_reconcile_runs", kind = "counter" },
+      { suffix = "_reconcile_failures", kind = "counter" },
+      -- Registered with an explicit Seconds unit, so the exposed name carries the suffix.
+      { suffix = "_reconcile_duration_seconds", kind = "histogram" },
     },
     failure_labels = { "instance", "error" },
   },
@@ -117,7 +128,17 @@ function ops.identity(spec)
   function id:metric_families()
     local out = {}
     for _, f in ipairs(ops.contract.metrics.families) do
-      out[#out + 1] = (f:gsub("{prefix}", self.metric_prefix))
+      out[#out + 1] = self.metric_prefix .. f.suffix
+    end
+    return out
+  end
+
+  --- The same families as `{ name, kind }`, for asserting the `# TYPE` declarations.
+  --- @return table[]
+  function id:metric_family_specs()
+    local out = {}
+    for _, f in ipairs(ops.contract.metrics.families) do
+      out[#out + 1] = { name = self.metric_prefix .. f.suffix, kind = f.kind }
     end
     return out
   end
@@ -536,8 +557,10 @@ function ops.standards.metrics(t, sut, id)
   -- A stub string is the failure this catches: real exposition carries TYPE metadata.
   t:expect(body, "body is Prometheus exposition, not a stub"):contains("# TYPE")
 
-  for _, family in ipairs(id:metric_families()) do
-    t:expect(body, "exposes " .. family):contains(family)
+  for _, fam in ipairs(id:metric_family_specs()) do
+    -- The declaration, not a sample: see `contract.metrics.families` for why.
+    t:expect(body, "declares " .. fam.name .. " (" .. fam.kind .. ")")
+      :contains("# TYPE " .. fam.name .. " " .. fam.kind)
   end
 
   -- The one metrics property whose violation degrades the monitoring system rather than the signal:
@@ -651,6 +674,24 @@ end
 function ops.chart_probe_facts(yaml_text)
   local facts = { ports = {} }
 
+  -- Narrow to the DEPLOYMENT documents first.
+  --
+  -- `helm template` renders every template, and these charts ship their CRDs — whose OpenAPI schemas
+  -- describe the probe fields of the workloads the operator manages. Those schemas contain properties
+  -- literally named `readinessProbe`, each with a `description:`. Scanning the whole multi-document
+  -- render therefore read a CRD's schema and reported `path: "description:"`, failing four operators
+  -- whose charts were correct. The probes under proof are the OPERATOR's own, and those live only in
+  -- its Deployment.
+  local deployments = {}
+  for doc in (yaml_text .. "\n---\n"):gmatch("(.-)\n%-%-%-") do
+    if doc:match("\nkind:%s*Deployment") or doc:match("^kind:%s*Deployment") then
+      deployments[#deployments + 1] = doc
+    end
+  end
+  if #deployments > 0 then
+    yaml_text = table.concat(deployments, "\n")
+  end
+
   -- Named container ports, so a probe's `port: metrics` resolves to a number. Both key orders.
   for name, num in yaml_text:gmatch("name:%s*([%w-]+)%s*\n%s*containerPort:%s*(%d+)") do
     facts.ports[name] = tonumber(num)
@@ -690,9 +731,39 @@ function ops.standards.chart(t, id, sut, chart_dir)
   local dir = chart_dir or (prova.root .. "/" .. ops.contract.chart.dir)
   t:expect(dir, "the operator ships a Helm chart"):is_dir()
 
-  local rendered = shell.run({ "helm", "template", id.name, dir }, { timeout = "120s" })
-  t:expect(rendered:ok(), "helm template renders the chart:\n" .. (rendered.stderr or "")):is_true()
+  -- Render with the chart's own test values when it ships them.
+  --
+  -- A chart may legitimately `required` a deployment-time value with no sensible default —
+  -- platform-organization-operator's `aws.organizationManagement.roleArn` is one — so rendering with
+  -- defaults alone fails on a chart that is perfectly correct. `ci/test-values.yaml` (helm's own
+  -- convention for `helm test`) or `test-values.yaml` is where a chart states the minimum that makes
+  -- it render, so O6 uses it when present and plain defaults otherwise.
+  local args = { "helm", "template", id.name, dir }
+  for _, candidate in ipairs{ dir .. "/ci/test-values.yaml", dir .. "/test-values.yaml" } do
+    if fs.exists(candidate) then
+      args[#args + 1] = "-f"
+      args[#args + 1] = candidate
+      break
+    end
+  end
+
+  local rendered = shell.run(args, { timeout = "120s" })
   if not rendered:ok() then
+    -- Carry the exit code AND both streams. The first cut reported only stderr, and helm exited with
+    -- it empty — leaving "helm template renders the chart:" and nothing else, which is undiagnosable
+    -- without shelling out by hand. Same lesson as prova's own HTTP errors: a failure message that
+    -- drops the cause turns a one-run diagnosis into guesswork.
+    t:expect(
+      false,
+      string.format(
+        "helm template %s %s failed (exit %s)\n--- stderr:\n%s\n--- stdout:\n%s",
+        id.name,
+        dir,
+        tostring(rendered.code),
+        (rendered.stderr ~= nil and rendered.stderr ~= "") and rendered.stderr or "(empty)",
+        (rendered.stdout ~= nil and rendered.stdout ~= "") and rendered.stdout:sub(1, 2000) or "(empty)"
+      )
+    ):is_true()
     return
   end
 
@@ -746,6 +817,59 @@ end
 -- O8 — suite hygiene
 ------------------------------------------------------------------------------------------
 
+--- O8's end state, authored as a REVERSE SPEC: every git-sourced plugin pinned to a released tag.
+---
+--- The inversion is the point. A normal spec asserts behavior that does not exist yet; this one
+--- asserts a state the repo has not reached yet — and prova's spec semantics do the rest:
+---
+---   * while a plugin is still pinned to `dev`, the body is RED, so it reports as an open spec, CI
+---     stays green, and `prova specs` lists it. The reminder lives in the suite, not in a TODO
+---     comment or someone's memory.
+---   * the moment the pin is moved to a released tag, the body turns GREEN — which prova reports as a
+---     FAILURE demanding the spec flag be dropped. Graduation lands in the same commit as the
+---     migration it describes.
+---
+--- Across a fleet this becomes a phase tracker: `prova specs` in each repo enumerates who is still on
+--- the incubation pin, and the surface empties itself as they migrate.
+---
+--- Call it wrapped in a spec while incubating:
+---
+---   prova.test("plugins are pinned to released tags",
+---     { spec = "operator-standards is on dev until it cuts v1 — YP6M-3208" },
+---     function(t) ops.standards.released_pins(t) end)
+---
+--- @param t any
+function ops.standards.released_pins(t)
+  local root = prova.root
+  local nook = root .. "/.prova/prova.toml"
+  local manifest_path = fs.exists(nook) and nook or root .. "/prova.toml"
+  local raw = fs.read(manifest_path)
+
+  -- Directives only: the manifest's own prose explains WHY a dev pin is there, and matching that
+  -- text would make the comment fail the check it documents.
+  local lines = {}
+  for line in raw:gmatch("[^\n]*") do
+    local code = line:gsub("#.*$", "")
+    if code:match("%S") then
+      lines[#lines + 1] = code
+    end
+  end
+  local text = table.concat(lines, "\n")
+
+  local moving = {}
+  for decl in text:gmatch("[%w_-]+%s*=%s*{[^}]*}") do
+    if decl:find("git%s*=") and not decl:find("tag%s*=") then
+      moving[#moving + 1] = (decl:match("^([%w_-]+)") or "?")
+    end
+  end
+
+  t:expect(
+    moving,
+    "every git-sourced plugin is pinned to a released tag; still moving: "
+      .. (#moving > 0 and table.concat(moving, ", ") or "none")
+  ):is_empty()
+end
+
 --- O8 — properties of the repo, not of a running operator, so this needs no cluster and no docker.
 function ops.standards.hygiene(t, _id)
   local root = prova.root
@@ -772,9 +896,27 @@ function ops.standards.hygiene(t, _id)
     :never()
     :matches("\n%s*paths%s*=")
 
-  -- A plugin pinned to a moving ref makes the suite non-reproducible.
+  -- A plugin pinned to a moving ref makes the suite non-reproducible — with ONE sanctioned
+  -- exception, `dev`.
+  --
+  -- `dev` is the org's integration branch (prova-p6m-standards and every archetype repo carry
+  -- `dev` alongside `main`), and pinning it is how a standards plugin is iterated on before it has
+  -- earned a release. Allowing it by silence would be an accident; allowing it by name is a
+  -- decision, and it comes with the obligation below.
+  --
+  -- `main` is never acceptable: it is the release branch, so pinning it gets you whatever shipped
+  -- last with none of a tag's reproducibility.
   t:expect(text, "no plugin is pinned to @main"):never():contains("@main")
   t:expect(text, 'no plugin is pinned to branch = "main"'):never():matches('branch%s*=%s*"main"')
+
+  -- A `dev` pin is allowed but must not be silent: say so, so it cannot quietly outlive the
+  -- incubation that justified it. This is the reminder that O8 is not yet fully satisfied.
+  if text:match('branch%s*=%s*"dev"') then
+    print(
+      "prova: O8 — a plugin is pinned to `dev` (incubation). Graduate it to a released tag "
+        .. "before this suite is treated as reproducible."
+    )
+  end
 
   -- A local path plugin is fine while incubating but must never be committed: it resolves only on the
   -- machine that wrote it.

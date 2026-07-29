@@ -62,20 +62,47 @@ end)
 prova.test("metric_prefix is overridable, because a registered prefix may differ", function(t)
   local id = ops.identity{ name = "installation-operator", metric_prefix = "installation" }
   t:expect(id.metric_prefix):equals("installation")
-  t:expect(id:metric_families()):contains("installation_reconcile_runs_total")
+  t:expect(id:metric_families()):contains("installation_reconcile_runs")
 end)
 
-prova.test("metric_families substitutes the prefix into every contract family", function(t)
+prova.test("metric_families prefixes every contract family", function(t)
   local id = ops.identity{ name = "platform-edge-operator" }
   local fams = id:metric_families()
   t:expect(fams):has_length(#ops.contract.metrics.families)
-  t:expect(fams):contains("platform_edge_operator_reconcile_runs_total")
-  t:expect(fams):contains("platform_edge_operator_reconcile_failures_total")
+  t:expect(fams):contains("platform_edge_operator_reconcile_runs")
+  t:expect(fams):contains("platform_edge_operator_reconcile_failures")
   t:expect(fams):contains("platform_edge_operator_reconcile_duration_seconds")
-  -- A missed substitution would make O4 assert on the literal "{prefix}_..." and fail confusingly
-  -- rather than clearly.
-  for _, f in ipairs(fams) do
-    t:expect(f):never():contains("{prefix}")
+end)
+
+prova.test("metric_family_specs carries the TYPE kind O4 asserts on", function(t)
+  -- O4 asserts each family's `# TYPE` DECLARATION rather than a sample line, because a labelled
+  -- family (reconcile_failures) has no series until its first child. Getting that wrong is what made
+  -- the first live run report drift that was not there.
+  local specs = ops.identity{ name = "platform-edge-operator" }:metric_family_specs()
+  t:expect(specs):has_length(3)
+  local by_name = {}
+  for _, sp in ipairs(specs) do
+    by_name[sp.name] = sp.kind
+  end
+  t:expect(by_name["platform_edge_operator_reconcile_runs"]):equals("counter")
+  t:expect(by_name["platform_edge_operator_reconcile_failures"]):equals("counter")
+  t:expect(by_name["platform_edge_operator_reconcile_duration_seconds"]):equals("histogram")
+end)
+
+prova.test("the exposition p6m-kube-metrics actually emits satisfies O4", function(t)
+  -- Verbatim shape from the live run on 2026-07-28, trimmed. The failures family declares its TYPE
+  -- and has NO sample — exactly the case the first cut of O4 misread as a missing metric.
+  local body = [==[
+# HELP platform_cluster_operator_reconcile_runs Total number of reconciliations.
+# TYPE platform_cluster_operator_reconcile_runs counter
+platform_cluster_operator_reconcile_runs_total 0
+# HELP platform_cluster_operator_reconcile_failures Total number of reconciliation failures.
+# TYPE platform_cluster_operator_reconcile_failures counter
+# HELP platform_cluster_operator_reconcile_duration_seconds Duration of reconciliations.
+# TYPE platform_cluster_operator_reconcile_duration_seconds histogram
+]==]
+  for _, sp in ipairs(ops.identity{ name = "platform-cluster-operator" }:metric_family_specs()) do
+    t:expect(body, "declares " .. sp.name):contains("# TYPE " .. sp.name .. " " .. sp.kind)
   end
 end)
 
@@ -328,4 +355,116 @@ prova.test_each("has_artifactory ${verdict} on ${case}", {
   local status = ops.artifactory_status(c.probe, function() return c.token end)
   local gates = (status == "missing" or status == "rejected")
   t:expect(not gates, c.case .. " → " .. c.verdict):equals(c.expect_pass)
+end)
+
+--------------------------------------------------------------------------------------------------
+-- released_pins — the REVERSE SPEC, proven in both directions
+--------------------------------------------------------------------------------------------------
+
+-- The value of this helper is entirely in when it flips. Held against fixture manifests rather than
+-- this repo's own, so the proof does not change meaning the day we migrate.
+local function pins_moving(text)
+  local moving = {}
+  for decl in text:gmatch("[%w_-]+%s*=%s*{[^}]*}") do
+    if decl:find("git%s*=") and not decl:find("tag%s*=") then
+      moving[#moving + 1] = (decl:match("^([%w_-]+)") or "?")
+    end
+  end
+  return moving
+end
+
+prova.test("a dev pin is what keeps the spec OPEN (body red, CI green)", function(t)
+  local manifest = [[
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", branch = "dev" }
+kind = { git = "https://github.com/prova-rs/prova-kind", tag = "v1" }
+]]
+  local moving = pins_moving(manifest)
+  t:expect(moving):has_length(1)
+  t:expect(moving):contains("operator-standards")
+end)
+
+prova.test("moving the pin to a tag is what turns the spec GREEN — and so demands graduation", function(t)
+  -- prova reports a spec whose body passes as a FAILURE ("convert the flag or remove it"), so this
+  -- transition is the forcing function: the migration and the flag removal land in one commit.
+  local manifest = [[
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", tag = "v1" }
+kind = { git = "https://github.com/prova-rs/prova-kind", tag = "v1" }
+]]
+  t:expect(pins_moving(manifest)):is_empty()
+end)
+
+prova.test("a rev pin counts as moving too — only a tag graduates", function(t)
+  local manifest = [[
+[plugins]
+a = { git = "https://example.com/a", rev = "deadbeef" }
+b = { git = "https://example.com/b", branch = "main" }
+]]
+  t:expect(pins_moving(manifest)):has_length(2)
+end)
+
+prova.test("the manifest's own prose about dev does not trip the check", function(t)
+  -- The comment explaining WHY a dev pin exists mentions `branch = "dev"`. Matching raw text would
+  -- make the documentation fail the check it documents — the same false positive O8 already hit once.
+  local manifest = [[
+# Pinned to `dev` for now; see the note about branch = "dev" above.
+[plugins]
+operator-standards = { git = "https://github.com/p6m-run/prova-operator-standards", tag = "v1" }
+]]
+  local stripped = {}
+  for line in manifest:gmatch("[^\n]*") do
+    local code = line:gsub("#.*$", "")
+    if code:match("%S") then stripped[#stripped + 1] = code end
+  end
+  t:expect(pins_moving(table.concat(stripped, "\n"))):is_empty()
+end)
+
+prova.test("a CRD schema describing probe fields does not hijack the parse", function(t)
+  -- The real shape that failed four operators: these charts ship CRDs whose OpenAPI schemas describe
+  -- the probes of the workloads the operator MANAGES. Those properties are literally named
+  -- readinessProbe and carry a `description:`, so scanning the whole render read the CRD and reported
+  -- path "description:" for charts that were entirely correct.
+  local rendered = [[
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: platformapplications.p6m.dev
+spec:
+  versions:
+    - schema:
+        openAPIV3Schema:
+          properties:
+            readinessProbe:
+              description: HTTP path for the readiness check
+              properties:
+                path:
+                  description: the path
+                  type: string
+---
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: operator
+          ports:
+            - name: metrics
+              containerPort: 9090
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+          resources: {}
+]]
+  local facts = ops.chart_probe_facts(rendered)
+  t:expect(facts.readinessProbe.path, "reads the Deployment's probe, not the CRD's schema")
+    :equals("/readyz")
+  t:expect(facts.livenessProbe.path):equals("/healthz")
+  t:expect(facts.ports.metrics):equals(9090)
 end)
